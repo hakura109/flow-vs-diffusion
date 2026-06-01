@@ -1,48 +1,50 @@
 # Flow Matching vs Diffusion: Image Patch Reconstruction
 
-毕业设计项目：对比 **Diffusion** 与 **Flow Matching** 两种生成范式在图像 patch 重建任务上的表现。
+Graduation project: comparing the **Diffusion** and **Flow Matching** generative
+paradigms on an image patch reconstruction task.
 
-## 目标
+## Goal
 
-在相同的数据（CIFAR-10）、相同的骨干网络与评测协议下，公平对比 diffusion 与 flow matching
-在 image patch 重建质量（PSNR / SSIM / LPIPS）上的差异。
+Under the same data (CIFAR-10), the same backbone, and the same evaluation protocol,
+make a fair comparison between diffusion and flow matching on image patch
+reconstruction quality (PSNR / SSIM / LPIPS).
 
-## 工作流
+## Workflow
 
-- **本地（Windows, CPU）**：仅做冒烟测试（smoke test），确认代码不崩、形状和 loss 正常。
-- **云端（GPU）**：真正的训练与评测。
+- **Local (Windows, CPU)**: smoke tests only, to confirm the code doesn't crash and that shapes and loss look right.
+- **Cloud (GPU)**: the real training and evaluation.
 
-## 环境
+## Environment
 
 ```bash
 conda create -n flowproj python=3.11 -y
 conda activate flowproj
-# CPU 版 PyTorch
+# CPU build of PyTorch
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 
-## 目录结构
+## Directory structure
 
 ```
-configs/        实验配置 (yaml)
+configs/        experiment configs (yaml)
 src/
-  data/         数据集与 patchify
-  models/       网络结构（autoencoder / diffusion / flow）
-  metrics/      评测指标 (psnr/ssim/lpips)
-  train/        训练循环
-  utils/        通用工具 (seed/device)
-scripts/        可执行入口脚本
-experiments/    训练输出（git 忽略）
-notebooks/      探索性分析
+  data/         datasets and patchify
+  models/       network architectures (autoencoder / diffusion / flow)
+  metrics/      evaluation metrics (psnr/ssim/lpips)
+  train/        training loops
+  utils/        common utilities (seed/device)
+scripts/        runnable entry-point scripts
+experiments/    training outputs (git-ignored)
+notebooks/      exploratory analysis
 ```
 
-## 快速验证
+## Quick check
 
 ```bash
 python scripts/train_ae.py --smoke
 ```
 
-冒烟测试会取 2 张图，做一次前向 + 反向，打印输出形状与 loss。
+The smoke test takes 2 images, runs one forward + backward pass, and prints the output shape and loss.
 
-详细进展见 [LOGBOOK.md](LOGBOOK.md)。
+See [LOGBOOK.md](LOGBOOK.md) for detailed progress.

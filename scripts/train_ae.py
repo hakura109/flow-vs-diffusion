@@ -1,12 +1,12 @@
-"""自编码器训练入口。
+"""Autoencoder training entry point.
 
-三种模式：
-    python scripts/train_ae.py --smoke      # CPU 冒烟：2 张合成图，一次前向+反向
-    python scripts/train_ae.py --overfit    # 取一个真实 batch 反复训练，验证 loss 能降到 ~0
-    python scripts/train_ae.py              # 在真实 CIFAR-10 上完整训练（首次自动下载数据）
+Three modes:
+    python scripts/train_ae.py --smoke      # CPU smoke test: 2 synthetic images, one forward+backward
+    python scripts/train_ae.py --overfit    # repeat one real batch to verify loss can drop to ~0
+    python scripts/train_ae.py              # full training on real CIFAR-10 (auto-downloads on first run)
 
-完整训练会把 loss 写到 TensorBoard，训练后在测试集上保存重建网格图并计算
-PSNR/SSIM/LPIPS，结果统一落在 experiments/<时间戳>_<模式>/ 下。
+Full training writes loss to TensorBoard, and after training saves a reconstruction grid
+and computes PSNR/SSIM/LPIPS on the test set; results land under experiments/<timestamp>_<mode>/.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid, save_image
 
-# 让脚本能直接 import 到项目里的 src 包
+# Let the script import the project's src package directly
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -45,10 +45,10 @@ def make_run_dir(mode: str, timestamp: str) -> Path:
 def smoke_test() -> None:
     print("=== AE smoke test ===")
     set_seed(42)
-    device = torch.device("cpu")  # 冒烟测试强制 CPU
+    device = torch.device("cpu")  # smoke test forces CPU
     print(f"device: {device}")
 
-    # 2 张合成的 32x32 RGB 图，范围 [-1, 1]（不依赖数据下载）
+    # 2 synthetic 32x32 RGB images in [-1, 1] (no data download required)
     x = torch.rand(2, 3, 32, 32, device=device) * 2 - 1
     print(f"input shape : {tuple(x.shape)}  range=[{x.min():.3f}, {x.max():.3f}]")
 
@@ -69,16 +69,16 @@ def smoke_test() -> None:
     print(f"output shape: {tuple(recon.shape)}  range=[{recon.min():.3f}, {recon.max():.3f}]")
     print(f"loss        : {loss.item():.6f}")
 
-    assert recon.shape == x.shape, "输出形状与输入不一致"
-    assert torch.isfinite(loss), "loss 不是有限值"
-    print("smoke test PASSED ✅")
+    assert recon.shape == x.shape, "output shape does not match input"
+    assert torch.isfinite(loss), "loss is not finite"
+    print("smoke test PASSED")
 
 
 # --------------------------------------------------------------------------- #
-# overfit：单 batch 反复训练，验证模型确实能学
+# overfit: repeat a single batch to verify the model can actually learn
 # --------------------------------------------------------------------------- #
 def overfit(args: argparse.Namespace) -> None:
-    print("=== AE overfit (单 batch 反复训练) ===")
+    print("=== AE overfit (repeat a single batch) ===")
     set_seed(args.seed)
     device = get_device()
     print(f"device: {device}")
@@ -87,13 +87,13 @@ def overfit(args: argparse.Namespace) -> None:
     run_dir = make_run_dir("overfit", timestamp)
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
 
-    # 取一个真实 batch（固定不变）
+    # Take one real batch (kept fixed)
     loader = get_cifar10_dataloader(
         root=args.data_root, train=True, batch_size=args.overfit_batch, shuffle=True
     )
     images, _ = next(iter(loader))
     images = images.to(device)
-    print(f"overfit on {images.shape[0]} 张真实图，共 {args.overfit_steps} 步")
+    print(f"overfit on {images.shape[0]} real images for {args.overfit_steps} steps")
 
     model = ConvAutoencoder().to(device)
     criterion = nn.MSELoss()
@@ -119,21 +119,21 @@ def overfit(args: argparse.Namespace) -> None:
     writer.close()
     print(f"first loss = {first_loss:.6f}  ->  last loss = {last_loss:.6f}")
 
-    assert torch.isfinite(torch.tensor(last_loss)), "loss 不是有限值"
-    assert last_loss < first_loss * 0.1, "loss 没有明显下降（<10% 初始值），模型可能没在学"
+    assert torch.isfinite(torch.tensor(last_loss)), "loss is not finite"
+    assert last_loss < first_loss * 0.1, "loss did not drop noticeably (<10% of initial); model may not be learning"
     if last_loss < 0.01:
-        print(f"overfit PASSED ✅  loss 已降到接近 0（{last_loss:.6f}）")
+        print(f"overfit PASSED  loss dropped close to 0 ({last_loss:.6f})")
     else:
-        print(f"overfit OK ⚠️  loss 大幅下降但未到 0.01（{last_loss:.6f}），可增加步数")
-    print(f"TensorBoard 日志: {run_dir / 'tb'}")
+        print(f"overfit OK  loss dropped a lot but did not reach 0.01 ({last_loss:.6f}); consider more steps")
+    print(f"TensorBoard logs: {run_dir / 'tb'}")
 
 
 # --------------------------------------------------------------------------- #
-# 评估 + 可视化
+# evaluation + visualization
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
 def evaluate(model: nn.Module, loader, device, max_images: int):
-    """在测试集（前 max_images 张）上计算 PSNR/SSIM/LPIPS 平均值。"""
+    """Compute mean PSNR/SSIM/LPIPS over the first max_images of the test set."""
     model.eval()
     tot_psnr = tot_ssim = tot_lpips = 0.0
     n = 0
@@ -157,7 +157,7 @@ def evaluate(model: nn.Module, loader, device, max_images: int):
 
 @torch.no_grad()
 def save_recon_grid(model: nn.Module, images: torch.Tensor, path: Path, n: int = 8) -> None:
-    """上排原图、下排重建，存成一张网格图。"""
+    """Save a grid image: top row originals, bottom row reconstructions."""
     model.eval()
     orig = images[:n]
     recon = model(orig)
@@ -179,10 +179,10 @@ def format_metrics_table(metrics: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 完整训练
+# full training
 # --------------------------------------------------------------------------- #
 def train(args: argparse.Namespace) -> None:
-    print("=== AE 完整训练 (CIFAR-10) ===")
+    print("=== AE full training (CIFAR-10) ===")
     set_seed(args.seed)
     device = get_device()
     print(f"device: {device}")
@@ -222,11 +222,11 @@ def train(args: argparse.Namespace) -> None:
         writer.add_scalar("train/epoch_loss", epoch_loss, epoch)
         print(f"epoch {epoch + 1}/{args.epochs}  loss={epoch_loss:.6f}")
 
-    # 保存权重
+    # Save weights
     ckpt_path = run_dir / "autoencoder.pt"
     torch.save(model.state_dict(), ckpt_path)
 
-    # 评估 + 可视化
+    # Evaluation + visualization
     metrics = evaluate(model, test_loader, device, max_images=args.eval_images)
     for k in ("PSNR", "SSIM", "LPIPS"):
         writer.add_scalar(f"test/{k}", metrics[k], 0)
@@ -237,35 +237,35 @@ def train(args: argparse.Namespace) -> None:
 
     table = format_metrics_table(metrics)
     (run_dir / "metrics.md").write_text(
-        f"# AE 测试集评估\n\n上排原图、下排重建：`recon_grid.png`\n\n{table}\n",
+        f"# AE test-set evaluation\n\nTop row originals, bottom row reconstructions: `recon_grid.png`\n\n{table}\n",
         encoding="utf-8",
     )
     writer.close()
 
-    print("\n测试集评估：")
+    print("\nTest-set evaluation:")
     print(table)
-    print(f"\n重建网格图: {grid_path}")
-    print(f"权重:       {ckpt_path}")
-    print(f"指标表:     {run_dir / 'metrics.md'}")
-    print(f"TensorBoard: {run_dir / 'tb'}")
+    print(f"\nReconstruction grid: {grid_path}")
+    print(f"Weights:             {ckpt_path}")
+    print(f"Metrics table:       {run_dir / 'metrics.md'}")
+    print(f"TensorBoard:         {run_dir / 'tb'}")
 
 
 # --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train conv autoencoder on CIFAR-10")
-    p.add_argument("--smoke", action="store_true", help="CPU 冒烟测试：2 张图，一次前向+反向")
-    p.add_argument("--overfit", action="store_true", help="单 batch 反复训练，验证 loss 能降到 ~0")
+    p.add_argument("--smoke", action="store_true", help="CPU smoke test: 2 images, one forward+backward")
+    p.add_argument("--overfit", action="store_true", help="repeat a single batch to verify loss can drop to ~0")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--data-root", type=str, default="data")
-    # overfit 相关
+    # overfit-related
     p.add_argument("--overfit-steps", type=int, default=300)
     p.add_argument("--overfit-batch", type=int, default=32)
-    # 评估/可视化相关
-    p.add_argument("--eval-images", type=int, default=512, help="测试集上参与指标平均的图片数")
-    p.add_argument("--grid-images", type=int, default=8, help="重建网格每排图片数")
+    # evaluation/visualization-related
+    p.add_argument("--eval-images", type=int, default=512, help="number of test images averaged into the metrics")
+    p.add_argument("--grid-images", type=int, default=8, help="images per row in the reconstruction grid")
     return p.parse_args()
 
 

@@ -1,7 +1,7 @@
-"""图像重建评测指标：PSNR / SSIM / LPIPS。
+"""Image reconstruction metrics: PSNR / SSIM / LPIPS.
 
-所有函数的输入约定为 [-1, 1] 范围的张量 (B, C, H, W)；
-内部会按各指标的需求转换到合适的范围。
+All functions expect inputs as tensors (B, C, H, W) in the [-1, 1] range;
+internally they convert to whatever range each metric requires.
 """
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ from torchmetrics.functional.image import (
 
 
 def _to_unit_range(x: torch.Tensor) -> torch.Tensor:
-    """[-1, 1] -> [0, 1]。"""
+    """[-1, 1] -> [0, 1]."""
     return (x * 0.5 + 0.5).clamp(0.0, 1.0)
 
 
 @torch.no_grad()
 def psnr(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """峰值信噪比，越高越好。输入 [-1, 1]，在 [0, 1] 范围内计算（data_range=1.0）。"""
+    """Peak signal-to-noise ratio, higher is better. Inputs [-1, 1], computed in [0, 1] (data_range=1.0)."""
     return peak_signal_noise_ratio(
         _to_unit_range(pred), _to_unit_range(target), data_range=1.0
     )
@@ -30,7 +30,7 @@ def psnr(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def ssim(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """结构相似性，越高越好（最大 1.0）。输入 [-1, 1]。"""
+    """Structural similarity, higher is better (max 1.0). Inputs [-1, 1]."""
     return structural_similarity_index_measure(
         _to_unit_range(pred), _to_unit_range(target), data_range=1.0
     )
@@ -47,9 +47,9 @@ def _get_lpips_model(net: str, device: str):
 
 @torch.no_grad()
 def lpips(pred: torch.Tensor, target: torch.Tensor, net: str = "alex") -> torch.Tensor:
-    """感知距离，越低越好。LPIPS 期望输入在 [-1, 1]，正好与本项目约定一致。
+    """Perceptual distance, lower is better. LPIPS expects inputs in [-1, 1], which matches this project's convention.
 
-    返回 batch 上的平均值（标量张量）。
+    Returns the mean over the batch (a scalar tensor).
     """
     model = _get_lpips_model(net, str(pred.device))
     d = model(pred, target)

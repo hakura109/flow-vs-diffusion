@@ -1,11 +1,13 @@
-"""生成若干张 64x64 占位图，让 FFHQ-64 数据管道在拿到真实数据前就能跑通。
+"""Generate a handful of 64x64 placeholder images so the FFHQ-64 data pipeline
+can run before real data is available.
 
-用法：
-    python scripts/make_ffhq64_placeholders.py            # 默认 48 张 -> data/ffhq64/
+Usage:
+    python scripts/make_ffhq64_placeholders.py            # 48 images by default -> data/ffhq64/
     python scripts/make_ffhq64_placeholders.py --n 100 --out data/ffhq64
 
-生成的是随机渐变 + 椭圆/矩形的合成图，仅用于验证管道；
-拿到真实 FFHQ-64 图片后，直接把它们放进同一目录即可（占位图可删）。
+These are synthetic images (random gradients + ellipses/rectangles), only meant to
+exercise the pipeline. Once you have real FFHQ-64 images, just drop them into the same
+directory (the placeholders can be deleted).
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from PIL import Image, ImageDraw
 
 
 def _make_one(size: int, rng: random.Random) -> Image.Image:
-    # 竖直渐变背景
+    # Vertical gradient background
     top = tuple(rng.randint(0, 255) for _ in range(3))
     bottom = tuple(rng.randint(0, 255) for _ in range(3))
     img = Image.new("RGB", (size, size))
@@ -28,7 +30,7 @@ def _make_one(size: int, rng: random.Random) -> Image.Image:
         for x in range(size):
             px[x, y] = color
 
-    # 叠几个随机形状，增加多样性
+    # Overlay a few random shapes to add variety
     draw = ImageDraw.Draw(img)
     for _ in range(rng.randint(2, 4)):
         x0, y0 = rng.randint(0, size - 1), rng.randint(0, size - 1)
@@ -44,9 +46,9 @@ def _make_one(size: int, rng: random.Random) -> Image.Image:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Generate placeholder FFHQ-64 images")
-    p.add_argument("--n", type=int, default=48, help="生成图片数量")
-    p.add_argument("--out", type=str, default="data/ffhq64", help="输出目录")
-    p.add_argument("--size", type=int, default=64, help="图片边长")
+    p.add_argument("--n", type=int, default=48, help="number of images to generate")
+    p.add_argument("--out", type=str, default="data/ffhq64", help="output directory")
+    p.add_argument("--size", type=int, default=64, help="image side length")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -58,8 +60,8 @@ def main() -> None:
         img = _make_one(args.size, rng)
         img.save(out / f"placeholder_{i:04d}.png")
 
-    print(f"已生成 {args.n} 张 {args.size}x{args.size} 占位图 -> {out.resolve()}")
-    print("提示：拿到真实 FFHQ-64 后把图片放进同一目录即可（占位图可删）。")
+    print(f"Generated {args.n} placeholder {args.size}x{args.size} images -> {out.resolve()}")
+    print("Tip: once you have real FFHQ-64, drop the images into the same directory (placeholders can be deleted).")
 
 
 if __name__ == "__main__":

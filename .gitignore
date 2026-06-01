@@ -1,6 +1,6 @@
-# Experiment outputs and data
-experiments/
-data/
+# Experiment outputs and data (anchored to repo root so src/data/ is NOT ignored)
+/experiments/
+/data/
 
 # Python
 __pycache__/

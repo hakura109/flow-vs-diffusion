@@ -1,7 +1,8 @@
-"""小型卷积自编码器，用于 32x32 图像重建。
+"""Small convolutional autoencoder for 32x32 image reconstruction.
 
-输入/输出均为 [-1, 1] 范围（输出端用 Tanh），与数据归一化约定一致。
-encoder: 32 -> 16 -> 8（下采样 4 倍），decoder 对称上采样回 32。
+Both input and output are in the [-1, 1] range (Tanh on the output), consistent
+with the data normalization convention.
+encoder: 32 -> 16 -> 8 (4x downsampling); decoder upsamples symmetrically back to 32.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ class ConvAutoencoder(nn.Module):
             nn.ConvTranspose2d(c * 2, c, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(c),
             nn.ReLU(inplace=True),
-            # 32x32 -> 32x32, 收敛到 [-1, 1]
+            # 32x32 -> 32x32, squashed into [-1, 1]
             nn.Conv2d(c, in_channels, kernel_size=3, stride=1, padding=1),
             nn.Tanh(),
         )
