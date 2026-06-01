@@ -1,0 +1,22 @@
+# Experiment outputs and data
+experiments/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pt
+*.ckpt
+
+# TensorBoard / logs
+runs/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
