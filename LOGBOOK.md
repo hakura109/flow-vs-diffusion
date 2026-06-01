@@ -2,6 +2,17 @@
 
 > 记录每天的进展、决策与踩坑。新条目放最上面。
 
+## 2026-06-01 — FFHQ-64 数据管道
+
+- `src/data/datasets.py` 新增 `FlatImageDataset` + `get_ffhq64_dataset/dataloader`：
+  从本地图片文件夹（ImageFolder 风格，无需类别子目录）递归读图，短边 Resize→
+  CenterCrop 到 64×64，归一化到 [-1,1]。接口与 `get_cifar10_dataloader` 一致
+  （FFHQ 无内置 train/test 划分，`train` 仅决定 shuffle/drop_last）。
+- `scripts/make_ffhq64_placeholders.py`：在拿到真实数据前生成几十张 64×64 占位图，
+  让管道可跑通；真实 FFHQ-64 放进 `data/ffhq64/` 即可替换，loader 不用改。
+- 验证：48 张占位图 → batch `(16,3,64,64)`，范围 [-1.000, 0.992]。✅
+- 注：`data/` 已 gitignore，图片不入库。
+
 ## 2026-06-01 — Stage 1：AE 在真实 CIFAR-10 上跑通
 
 补完 `scripts/train_ae.py`，新增三件事：
