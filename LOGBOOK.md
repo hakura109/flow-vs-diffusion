@@ -2,6 +2,44 @@
 
 > Record daily progress, decisions, and pitfalls. Newest entries on top.
 
+## 2026-06-07 — Stage 1 baseline on real CIFAR-10 (CPU run)
+
+Ran the full Stage 1 pipeline locally (CPU, `flowproj` env) to lock in the AE baseline.
+
+- **Overfit check**: `python scripts/train_ae.py --overfit` — loss `0.374692 -> 0.001560`
+  over 300 steps on one 32-image batch. Passes the <10%-of-initial assertion; model learns.
+- **Full training**: `python scripts/train_ae.py --epochs 5` — per-epoch train loss
+  `0.0203 -> 0.0034`. Test-set metrics over 512 images:
+
+  | Metric | Value     |
+  | ------ | --------- |
+  | PSNR   | 32.245 dB |
+  | SSIM   | 0.9662    |
+  | LPIPS  | 0.0026    |
+
+  Outputs saved under `experiments/20260607_215354_train/`: `autoencoder.pt`,
+  `recon_grid.png` (top originals / bottom reconstructions — visually near-identical),
+  `metrics.md`, and TensorBoard logs. Note `experiments/` is git-ignored, so only the
+  numbers live here in the LOGBOOK.
+
+This is the **AE upper-bound reference** for the reconstruction task: it bounds how well a
+clean 4x-downsampling latent can be decoded, before any generative head is involved.
+
+Pitfalls:
+- On Windows use the `flowproj` env interpreter directly
+  (`C:\Users\strag\.conda\envs\flowproj\python.exe`); the base env is separate.
+- Harmless warnings on this run: a NumPy 2.4 `VisibleDeprecationWarning` from torchvision's
+  CIFAR pickle loader, and torchvision `pretrained`/`weights` deprecation warnings from LPIPS
+  loading AlexNet. Neither affects results.
+
+### Next
+- [ ] **Phase A stepping-stone**: simplified DDPM — whole-image, pure denoising (no transformer
+  backbone yet). Goal is to get the diffusion mechanism + train/sample/eval pipeline running;
+  smoke test first.
+- [ ] Phase B: transformer encoder (per-patch hidden states) + generative head conditioned on
+  each patch's hidden state. Pending the "Frontier-Core" backbone reference + advisor sign-off.
+- [ ] Cloud GPU full AE training to refine the baseline (longer schedule than 5 CPU epochs).
+
 ## 2026-06-01 — FFHQ-64 data pipeline
 
 - `src/data/datasets.py` adds `FlatImageDataset` + `get_ffhq64_dataset/dataloader`:
