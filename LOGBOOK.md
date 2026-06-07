@@ -2,6 +2,31 @@
 
 > Record daily progress, decisions, and pitfalls. Newest entries on top.
 
+## 2026-06-08 — Cloud GPU baselines: AE + DDPM
+
+Ran both baselines to convergence on cloud GPU. Both pipelines work end to end.
+
+- **Autoencoder (50 epochs)** — test set: PSNR **40.01** / SSIM **0.9918** / LPIPS **0.0003**.
+  Near-perfect reconstruction. Caveat: the latent is *overcomplete* (8x8x128 = 8192 dims vs
+  3x32x32 = 3072 input dims), i.e. it is not actually compressing. So this is a
+  **no-compression upper bound**, not a meaningful bottleneck baseline. The real study varies
+  the bottleneck (patch size, latent dim); this number only says "with no compression, decoding
+  is essentially lossless."
+- **DDPM (30 epochs, T=1000)** — train loss converged to ~**0.032**. Unconditional samples are
+  rough but structured CIFAR-style images (recognizable shapes/colors, not noise). Denoising
+  reconstruction at t_start=500: PSNR **13.4** / SSIM **0.20** / LPIPS **0.14**. These are low
+  *by design* — at half-noise the task is largely generative (most detail destroyed, then
+  re-imagined), so they are NOT directly comparable to the AE numbers above.
+
+Conclusion: both baselines run and behave as expected. They are reference points, not a fair
+head-to-head — the real diffusion vs flow-matching comparison happens later under one shared
+pipeline (same backbone, same data, same eval protocol).
+
+### Next
+- [ ] Phase B: transformer encoder (per-patch hidden states) + generative head conditioned on
+  each patch's hidden state — pending the "Frontier-Core" backbone reference + advisor sign-off.
+- [ ] Flow-matching head as the counterpart to the DDPM head, then the fair comparison.
+
 ## 2026-06-07 — Phase A: minimal whole-image DDPM baseline (code + CPU checks)
 
 Built the Stage 2 stepping-stone: a standard *unconditional* DDPM on full 32x32 images
