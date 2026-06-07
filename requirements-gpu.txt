@@ -1,0 +1,14 @@
+# GPU machines: do NOT install torch/torchvision here.
+# Use the cloud template's preinstalled CUDA build of PyTorch, then:
+#   pip install -r requirements-gpu.txt
+# (installing torch/torchvision via pip would risk overwriting it with a CPU wheel)
+numpy
+matplotlib
+einops
+tqdm
+pillow
+pyyaml
+torchmetrics
+lpips
+scikit-image
+tensorboard
