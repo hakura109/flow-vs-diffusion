@@ -2,6 +2,41 @@
 
 > Record daily progress, decisions, and pitfalls. Newest entries on top.
 
+## 2026-06-07 — Phase A: minimal whole-image DDPM baseline (code + CPU checks)
+
+Built the Stage 2 stepping-stone: a standard *unconditional* DDPM on full 32x32 images
+(no transformer backbone, no per-patch conditioning yet). Goal was only to get the
+diffusion mechanism + train/sample/eval pipeline running end to end.
+
+- `src/models/diffusion.py`: `linear_beta_schedule(T)`; a time-conditioned `SmallUNet`
+  (sinusoidal timestep embedding + skip-connected 32->16->8->16->32, ~3.34M params);
+  and a `Diffusion` module with `q_sample` (closed-form forward noising), `loss`
+  (epsilon-prediction MSE at a random t), `sample` (reverse chain from pure noise), and
+  `reconstruct` (noise to t_start then denoise back — gives a *paired* target so the
+  recon metrics are meaningful for an otherwise unconditional model).
+- `scripts/train_diffusion.py`: mirrors `train_ae.py` — `--smoke` / `--overfit` / full
+  training; loss to TensorBoard, an unconditional `sample()` grid, and denoising-
+  reconstruction PSNR/SSIM/LPIPS on the test set. Timestamped `experiments/<ts>_diffusion_<mode>/`.
+
+CPU checks (both pass):
+- **smoke** (T=50, batch=2): shapes match, loss finite, reverse chain runs.
+- **overfit** (T=1000, 32 real images, 300 steps): windowed-average loss
+  `0.3308 -> 0.0486` (~6.8x drop). Per-step loss is noisy because t is resampled every
+  step, so the overfit assertion compares first-window vs last-window averages rather than
+  single steps.
+
+Decisions:
+- **Eval = denoising reconstruction**: an unconditional DDPM has no paired target for a
+  from-noise sample, so test metrics noise each real image to `t_start = recon_t_frac * T`
+  (default half) and denoise back, then compare to the original. The from-noise grid is for
+  eyeballing sample quality only.
+- Defaults follow DDPM convention (`lr=2e-4`, `epochs=30`, `eval-images=64` since sampling
+  is slow). Full training is a cloud-GPU job; locally we only run `--smoke` / `--overfit`.
+
+### Next
+- [ ] Cloud GPU: full DDPM training, then log sample-grid quality + denoising-recon
+  PSNR/SSIM/LPIPS as a separate baseline entry.
+
 ## 2026-06-07 — Stage 1 baseline on real CIFAR-10 (CPU run)
 
 Ran the full Stage 1 pipeline locally (CPU, `flowproj` env) to lock in the AE baseline.
