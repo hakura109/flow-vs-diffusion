@@ -12,3 +12,5 @@ torchmetrics
 lpips
 scikit-image
 tensorboard
+datasets
+huggingface_hub

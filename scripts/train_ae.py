@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.datasets import denormalize, get_cifar10_dataloader
+from src.data.datasets import denormalize, get_cifar10_dataloader, get_ffhq64_dataloader
 from src.metrics.image_metrics import lpips, psnr, ssim
 from src.models.autoencoder import ConvAutoencoder
 from src.utils.setup import get_device, set_seed
@@ -33,10 +33,26 @@ from src.utils.setup import get_device, set_seed
 EXPERIMENTS = ROOT / "experiments"
 
 
-def make_run_dir(mode: str, timestamp: str) -> Path:
-    run_dir = EXPERIMENTS / f"{timestamp}_{mode}"
+def make_run_dir(dataset: str, mode: str, timestamp: str) -> Path:
+    run_dir = EXPERIMENTS / f"{timestamp}_{dataset}_{mode}"
     (run_dir / "tb").mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+def build_loader(args: argparse.Namespace, train: bool, batch_size: int, shuffle=None):
+    """Return a dataloader for the chosen dataset; images are normalized to [-1, 1] either way."""
+    if args.dataset == "ffhq64":
+        # FFHQ has no train/test split, so `train` only toggles shuffle/drop_last (see datasets.py).
+        return get_ffhq64_dataloader(
+            root=args.ffhq_root,
+            train=train,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            image_size=64,
+        )
+    return get_cifar10_dataloader(
+        root=args.data_root, train=train, batch_size=batch_size, shuffle=shuffle
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -84,13 +100,11 @@ def overfit(args: argparse.Namespace) -> None:
     print(f"device: {device}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = make_run_dir("overfit", timestamp)
+    run_dir = make_run_dir(args.dataset, "overfit", timestamp)
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
 
     # Take one real batch (kept fixed)
-    loader = get_cifar10_dataloader(
-        root=args.data_root, train=True, batch_size=args.overfit_batch, shuffle=True
-    )
+    loader = build_loader(args, train=True, batch_size=args.overfit_batch, shuffle=True)
     images, _ = next(iter(loader))
     images = images.to(device)
     print(f"overfit on {images.shape[0]} real images for {args.overfit_steps} steps")
@@ -182,21 +196,17 @@ def format_metrics_table(metrics: dict) -> str:
 # full training
 # --------------------------------------------------------------------------- #
 def train(args: argparse.Namespace) -> None:
-    print("=== AE full training (CIFAR-10) ===")
+    print(f"=== AE full training ({args.dataset}) ===")
     set_seed(args.seed)
     device = get_device()
     print(f"device: {device}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = make_run_dir("train", timestamp)
+    run_dir = make_run_dir(args.dataset, "train", timestamp)
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
 
-    train_loader = get_cifar10_dataloader(
-        root=args.data_root, train=True, batch_size=args.batch_size
-    )
-    test_loader = get_cifar10_dataloader(
-        root=args.data_root, train=False, batch_size=args.batch_size
-    )
+    train_loader = build_loader(args, train=True, batch_size=args.batch_size)
+    test_loader = build_loader(args, train=False, batch_size=args.batch_size)
 
     model = ConvAutoencoder().to(device)
     criterion = nn.MSELoss()
@@ -259,7 +269,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--data-root", type=str, default="data")
+    p.add_argument("--dataset", choices=["cifar10", "ffhq64"], default="cifar10", help="dataset to use")
+    p.add_argument("--data-root", type=str, default="data", help="root for CIFAR-10 (--dataset cifar10)")
+    p.add_argument("--ffhq-root", type=str, default="data/ffhq64", help="folder of FFHQ-64 PNGs (--dataset ffhq64)")
     # overfit-related
     p.add_argument("--overfit-steps", type=int, default=300)
     p.add_argument("--overfit-batch", type=int, default=32)
