@@ -2,6 +2,76 @@
 
 > Record daily progress, decisions, and pitfalls. Newest entries on top.
 
+## 2026-06-22 — Phase B: transformer backbone + swappable diffusion/flow heads (code + CPU checks)
+
+Built the Phase B core — the actual diffusion-vs-flow comparison rig. A transformer encodes an
+image into per-patch hidden states (the bottleneck under study); a per-patch *conditional*
+generative head then reconstructs each clean patch from noise given its own hidden state. The head
+sits behind one `PatchGenerativeHead` interface so the two paradigms differ ONLY in the generative
+mechanism — same backbone, same data, same eval, same head capacity.
+
+- `src/models/patch_transformer.py`:
+  - `PatchTransformer` backbone: patchify -> linear patch-embed -> + learned pos-embed -> N pre-norm
+    transformer blocks (multi-head self-attention + MLP) -> final norm -> per-patch hidden states
+    `(B, N, D)`. RoPE and QK-Norm are wired as *hooks* but intentionally raise `NotImplementedError`
+    (insertion points marked so they can be filled later without touching the forward backbone).
+  - `PatchDenoiser`: the shared conditional network `(noised patch, t, hidden state) -> (predicted
+    noise | velocity)`, operating on a flat `(B*N, patch_dim)` batch.
+  - `DiffusionPatchHead` (reuses diffusion.py's schedule / `q_sample` / reverse chain; reconstructs
+    from *pure* noise at t=T) and `FlowMatchingPatchHead` (straight-line interpolant
+    `x_t=(1-t)·x0+t·x1`, MSE to the constant velocity `x1-x0`, forward-Euler t=0->1). Identical
+    `loss` / `sample` signatures.
+  - `PatchReconstructionModel`: backbone + head; `head_kind="diffusion"|"flow"` toggles the decoder.
+    This is a true encode->decode reconstruction (the hidden state is the bottleneck, recon paired
+    with the original), so PSNR/SSIM/LPIPS are directly meaningful here — unlike Phase A's half-noise
+    denoising recon.
+- `scripts/train_patch.py`: mirrors `train_diffusion.py`. `--head diffusion|flow`,
+  `--smoke`/`--overfit`/full, shared backbone/data/eval, timestamped
+  `experiments/<ts>_patch_<head>_<dataset>_<mode>/`.
+- `scripts/evaluate.py`: unified head-to-head comparison that groups results by *protocol* so
+  non-comparable tasks never share a table. NOTE: it currently loads only `ae` + whole-image
+  `diffusion`; a `patch` builder is still TODO (see Next) before the two patch checkpoints can be
+  scored side by side.
+
+**Capacity-matched** (the load-bearing fairness property): both heads wrap one identically-shaped
+`PatchDenoiser`, so each head is **165,568 params** and the full model is **1,446,976 params**
+either way. The flow head holds NO diffusion schedule (no betas / `q_sample` / reverse chain),
+asserted by a smoke guard. So the only thing that differs between the two arms is the generative
+mechanism itself.
+
+CPU checks (all pass):
+- **smoke** (both heads): shapes match, loss finite, recon clamped to [-1, 1]. The full-module smoke
+  also asserts FM-specific correctness — interpolant endpoints (t=0 -> noise, t=1 -> clean), the
+  `time_scale` fix restoring the sinusoidal embedding's dynamic range (raw-t std 0.022 -> scaled-t
+  std 0.508), deterministic Euler under a fixed seed, and head-param-count parity vs the diffusion head.
+- **overfit** (8 real images, 500 steps, windowed avg of first-50 vs last-50):
+
+  | Head      | first-50 avg | last-50 avg |
+  | --------- | ------------ | ----------- |
+  | diffusion | 0.970        | 0.210       |
+  | flow      | 1.122        | 0.435       |
+
+  Both trend down strongly (assertion = last < first). Neither reaches < 0.05, and that is
+  *expected*: the per-step target is re-randomized every step (diffusion: fresh t + noise; flow:
+  fresh noise endpoint + t), so even a perfect memorizer of 8 images has irreducible MSE in this
+  objective. The point — both heads genuinely learn — holds.
+
+Caveat (do NOT misread): the diffusion loss (epsilon-prediction MSE, unit-variance target) and the
+flow loss (velocity MSE, target `x1-x0` with larger variance) live on **different scales** — flow's
+higher absolute loss does NOT mean it is worse. Only the final reconstruction metrics
+(PSNR/SSIM/LPIPS) are comparable across heads.
+
+Reference baselines (context, unchanged from 2026-06-08): AE no-compression upper bound
+40.01 / 0.9918 / 0.0003; whole-image DDPM half-noise denoising recon 13.4 / 0.20 / 0.14. Phase B is
+the first setup where diffusion and flow are measured head-to-head under one shared pipeline.
+
+### Next
+- [ ] `scripts/evaluate.py`: add a `patch` builder so the two trained patch checkpoints (diffusion
+  vs flow) land in one comparison table under a shared protocol.
+- [ ] Cloud GPU: train `--head diffusion` and `--head flow` to convergence on CIFAR-10; log
+  head-to-head PSNR/SSIM/LPIPS + reconstruction grids as the project's headline result.
+- [ ] (Later) fill the RoPE / QK-Norm hooks and re-run the comparison as an ablation.
+
 ## 2026-06-08 — Cloud GPU baselines: AE + DDPM
 
 Ran both baselines to convergence on cloud GPU. Both pipelines work end to end.
