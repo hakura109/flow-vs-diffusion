@@ -129,15 +129,22 @@ def _ddim_timesteps(timesteps: int, nfe: int) -> list[int]:
 
 
 @torch.no_grad()
-def _ddim_sample(head: DiffusionPatchHead, cond: torch.Tensor, nfe: int, device: torch.device
-                 ) -> torch.Tensor:
-    """Deterministic DDIM (eta=0) respacing to exactly `nfe` steps for the diffusion head.
+def _ddim_sample(head: DiffusionPatchHead, cond: torch.Tensor, nfe: int, device: torch.device,
+                 eta: float = 0.0) -> torch.Tensor:
+    """DDIM respacing to exactly `nfe` steps for the diffusion head; `eta` sets the stochasticity.
 
     DDIM is the standard way to sample a trained epsilon-prediction diffusion model in fewer steps:
     choose `nfe` timesteps spaced over [0, T-1] (descending from the noisiest), and at each one predict
     x0 from the noise estimate, then jump straight to the next timestep. NFE equals the number of
     denoiser() calls, so it lines up with the flow head's Euler-step count. nfe=1 is a single one-shot
     x0 prediction from pure noise. Returns clean patches (B, N, patch_dim).
+
+    Per step (ab = alpha_bar), the Song et al. (2021) update with variance
+        sigma = eta * sqrt((1 - ab_prev) / (1 - ab_cur)) * sqrt(1 - ab_cur / ab_prev)
+        x_prev = sqrt(ab_prev) * x0 + sqrt(1 - ab_prev - sigma^2) * eps + sigma * z,   z ~ N(0, I)
+    eta=0 -> sigma=0 -> fully deterministic DDIM; eta=1 -> sigma recovers the DDPM ancestral variance
+    (so eta=1 is close to DDPM ancestral sampling). The final step (ab_prev=1) has sigma=0 for any eta,
+    so it stays a deterministic x0 read-out.
     """
     alpha_bars = head.diffusion.alpha_bars  # (T,)
     timesteps = head.diffusion.timesteps
@@ -156,20 +163,29 @@ def _ddim_sample(head: DiffusionPatchHead, cond: torch.Tensor, nfe: int, device:
         x0 = ((x - torch.sqrt(1.0 - ab_cur) * eps) / torch.sqrt(ab_cur)).clamp(-1.0, 1.0)
         t_prev = seq[j + 1] if j + 1 < len(seq) else -1
         ab_prev = alpha_bars[t_prev] if t_prev >= 0 else torch.ones((), device=device)
-        # DDIM deterministic update (eta=0): re-noise the x0 estimate to the next timestep.
-        x = torch.sqrt(ab_prev) * x0 + torch.sqrt(1.0 - ab_prev) * eps
+        # Stochasticity: sigma=0 when eta=0 (deterministic) or at the last step (ab_prev=1).
+        sigma = eta * torch.sqrt((1.0 - ab_prev) / (1.0 - ab_cur) * (1.0 - ab_cur / ab_prev))
+        # clamp_min guards the sqrt against tiny negative values from float error near the boundaries.
+        eps_coeff = torch.sqrt((1.0 - ab_prev - sigma ** 2).clamp_min(0.0))
+        x = torch.sqrt(ab_prev) * x0 + eps_coeff * eps
+        if eta > 0.0:
+            x = x + sigma * torch.randn_like(x)  # inject the DDIM stochastic term
     return x.reshape(b, n, head.patch_dim)
 
 
 @torch.no_grad()
-def reconstruct_nfe(model: PatchReconstructionModel, images: torch.Tensor, nfe: int) -> torch.Tensor:
-    """One reconstruction at the given NFE. encode -> sample patches at `nfe` steps -> unpatchify."""
+def reconstruct_nfe(model: PatchReconstructionModel, images: torch.Tensor, nfe: int,
+                    eta: float = 0.0) -> torch.Tensor:
+    """One reconstruction at the given NFE. encode -> sample patches at `nfe` steps -> unpatchify.
+
+    `eta` is the DDIM stochasticity (diffusion head only); the flow head has no such knob and ignores it.
+    """
     head = model.head
     cond = model.backbone(images)  # (B, N, D) per-patch hidden states
     if isinstance(head, FlowMatchingPatchHead):
-        patches = head.sample(cond, num_steps=nfe)            # exactly nfe Euler steps
+        patches = head.sample(cond, num_steps=nfe)            # exactly nfe Euler steps (eta N/A)
     elif isinstance(head, DiffusionPatchHead):
-        patches = _ddim_sample(head, cond, nfe, images.device)  # exactly nfe DDIM steps
+        patches = _ddim_sample(head, cond, nfe, images.device, eta=eta)  # exactly nfe DDIM steps
     else:
         raise TypeError(f"unsupported head type {type(head).__name__}")
     recon = unpatchify(patches, model.patch_size, model.img_size, model.img_size, model.channels)
@@ -195,15 +211,15 @@ def compute_metrics(recon: torch.Tensor, target: torch.Tensor, chunk: int = 32) 
 
 
 def time_reconstruct(model: PatchReconstructionModel, images: torch.Tensor, nfe: int,
-                     runs: int, device: torch.device) -> float:
+                     runs: int, device: torch.device, eta: float = 0.0) -> float:
     """Mean wall-clock seconds of one reconstruction: one un-timed warmup, then `runs` timed runs."""
-    reconstruct_nfe(model, images, nfe)  # warmup (caches, autotune); not timed
+    reconstruct_nfe(model, images, nfe, eta=eta)  # warmup (caches, autotune); not timed
     if device.type == "cuda":
         torch.cuda.synchronize()
     times = []
     for _ in range(runs):
         t0 = time.perf_counter()
-        reconstruct_nfe(model, images, nfe)
+        reconstruct_nfe(model, images, nfe, eta=eta)
         if device.type == "cuda":
             torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
@@ -211,15 +227,15 @@ def time_reconstruct(model: PatchReconstructionModel, images: torch.Tensor, nfe:
 
 
 def run_sweep(model: PatchReconstructionModel, images: torch.Tensor, nfes: list[int],
-              runs: int, device: torch.device, seed: int) -> list[dict]:
+              runs: int, device: torch.device, seed: int, eta: float = 0.0) -> list[dict]:
     """For each NFE: seed-fixed quality metrics + warmup-then-mean timing. Returns one row per NFE."""
     model.eval()
     rows = []
     for nfe in nfes:
         set_seed(seed)  # identical initial noise across NFEs, so only the step count varies
-        recon = reconstruct_nfe(model, images, nfe)
+        recon = reconstruct_nfe(model, images, nfe, eta=eta)
         metrics = compute_metrics(recon, images)
-        secs = time_reconstruct(model, images, nfe, runs, device)
+        secs = time_reconstruct(model, images, nfe, runs, device, eta=eta)
         n_img = images.shape[0]
         metrics.update({"NFE": nfe, "time_s": secs, "ms_per_img": 1000.0 * secs / n_img})
         rows.append(metrics)
@@ -246,11 +262,14 @@ def format_table(rows: list[dict]) -> str:
 
 
 def build_markdown(rows: list[dict], head: str, dataset: str, ckpt: str, n_images: int,
-                   runs: int, device: torch.device) -> str:
-    sampler = ("Flow head sampled with forward-Euler; NFE = Euler steps = velocity-net calls."
-               if head == "flow" else
-               "Diffusion head sampled with deterministic DDIM (eta=0) respacing; NFE = denoiser "
-               "calls. This differs from the training-time full DDPM ancestral eval.")
+                   runs: int, device: torch.device, eta: float = 0.0) -> str:
+    if head == "flow":
+        sampler = "Flow head sampled with forward-Euler; NFE = Euler steps = velocity-net calls."
+    else:
+        kind = ("deterministic DDIM (eta=0)" if eta == 0.0 else
+                f"stochastic DDIM (eta={eta:g}; eta=1 approximates DDPM ancestral)")
+        sampler = (f"Diffusion head sampled with {kind} respacing; NFE = denoiser calls. "
+                   "This differs from the training-time full DDPM ancestral eval.")
     return (
         f"# NFE sweep ({head} head, {dataset})\n\n"
         f"Checkpoint: `{ckpt}`  \n"
@@ -341,6 +360,11 @@ def smoke_test() -> None:
         recon = reconstruct_nfe(model, images, nfes[-1])
         assert recon.shape == images.shape, recon.shape
         assert torch.isfinite(recon).all() and recon.min() >= -1.0 and recon.max() <= 1.0
+        # diffusion head: the stochastic DDIM path (eta>0) must also stay finite / shaped / in range.
+        if head_kind == "diffusion":
+            recon_eta = reconstruct_nfe(model, images, nfes[-1], eta=1.0)
+            assert recon_eta.shape == images.shape, recon_eta.shape
+            assert torch.isfinite(recon_eta).all() and recon_eta.min() >= -1.0 and recon_eta.max() <= 1.0
         print(format_table(rows))
 
     print("\nsmoke test PASSED")
@@ -434,6 +458,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--head-hidden", type=int, default=256, help="generative head MLP width")
     p.add_argument("--head-blocks", type=int, default=3, help="generative head residual blocks")
     p.add_argument("--timesteps", type=int, default=1000, help="diffusion head schedule length T (DDIM respaces within this)")
+    p.add_argument("--eta", type=float, default=0.0, help="diffusion head DDIM stochasticity: 0=deterministic, 1~=DDPM ancestral")
     p.add_argument("--flow-steps", type=int, default=50, help="flow head construction default (overridden per-NFE in the sweep)")
     return p.parse_args()
 
@@ -457,7 +482,7 @@ def main() -> None:
     device = get_device()
     image_size = IMAGE_SIZE[args.dataset]
     nfes = parse_nfes(args.nfes)
-    print(f"device: {device}  head: {args.head}  dataset: {args.dataset}  NFEs: {nfes}")
+    print(f"device: {device}  head: {args.head}  dataset: {args.dataset}  NFEs: {nfes}  eta: {args.eta:g}")
 
     model = build_model(args, image_size, device, args.head)
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
@@ -467,7 +492,7 @@ def main() -> None:
     images = load_eval_images(args, device, args.eval_images)
     print(f"fixed eval subset: {tuple(images.shape)}\n")
 
-    rows = run_sweep(model, images, nfes, args.timing_runs, device, args.seed)
+    rows = run_sweep(model, images, nfes, args.timing_runs, device, args.seed, eta=args.eta)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = EXPERIMENTS / f"{timestamp}_nfe_{args.head}_{args.dataset}"
@@ -475,7 +500,7 @@ def main() -> None:
     md_path = run_dir / "nfe_sweep.md"
     md_path.write_text(
         build_markdown(rows, args.head, args.dataset, str(ckpt_path), images.shape[0],
-                       args.timing_runs, device),
+                       args.timing_runs, device, eta=args.eta),
         encoding="utf-8",
     )
 
