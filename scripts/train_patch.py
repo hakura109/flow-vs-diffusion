@@ -16,7 +16,8 @@ Three modes:
 
 Full training writes the loss to TensorBoard, then saves a reconstruction grid (encode -> sample
 patches from noise given cond -> unpatchify) and reports reconstruction PSNR/SSIM/LPIPS on the test
-set. Everything for a run lands under experiments/<timestamp>_patch_<head>_<dataset>_<mode>/.
+set. Everything for a run lands under experiments/<timestamp>_patch_<head>_<dataset>_<mode>_seed<seed>/
+(the seed is in the folder name so runs that differ only by --seed don't overwrite each other).
 """
 from __future__ import annotations
 
@@ -43,8 +44,9 @@ EXPERIMENTS = ROOT / "experiments"
 IMAGE_SIZE = {"cifar10": 32, "ffhq64": 64}  # spatial size per dataset (the backbone adapts via img_size)
 
 
-def make_run_dir(dataset: str, head: str, mode: str, timestamp: str) -> Path:
-    run_dir = EXPERIMENTS / f"{timestamp}_patch_{head}_{dataset}_{mode}"
+def make_run_dir(dataset: str, head: str, mode: str, timestamp: str, seed: int) -> Path:
+    # seed is part of the name so runs differing only by --seed land in distinct folders.
+    run_dir = EXPERIMENTS / f"{timestamp}_patch_{head}_{dataset}_{mode}_seed{seed}"
     (run_dir / "tb").mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -82,24 +84,39 @@ def build_model(args: argparse.Namespace, image_size: int, device: torch.device)
 # smoke
 # --------------------------------------------------------------------------- #
 def smoke_test(args: argparse.Namespace) -> None:
-    print(f"=== patch model smoke test (head={args.head}) ===")
-    set_seed(42)
+    print(f"=== patch model smoke test (head={args.head}, dataset={args.dataset}, seed={args.seed}) ===")
+    set_seed(args.seed)  # seed BEFORE the synthetic batch and model init, so a fixed seed is reproducible
     device = torch.device("cpu")  # smoke test forces CPU
-    print(f"device: {device}")
 
-    # 2 synthetic 32x32 RGB images in [-1, 1] (no data download required).
-    x = torch.rand(2, 3, 32, 32, device=device) * 2 - 1
+    # Size the synthetic batch to the chosen dataset (ffhq64 -> 64, cifar10 -> 32) so the smoke
+    # exercises THAT dataset's patchify path (e.g. 64x64), all from synthetic data -- no disk / download.
+    image_size = IMAGE_SIZE[args.dataset]
+    if image_size % args.patch_size != 0:
+        raise SystemExit(
+            f"--patch-size {args.patch_size} does not divide {args.dataset} image size {image_size}"
+        )
+    num_patches = (image_size // args.patch_size) ** 2  # recomputed for this image_size / patch_size
+    print(f"device: {device}  image_size: {image_size}  patch_size: {args.patch_size}  "
+          f"-> {num_patches} patches")
+
+    # 2 synthetic RGB images in [-1, 1] at the dataset's resolution (no data download required).
+    x = torch.rand(2, 3, image_size, image_size, device=device) * 2 - 1
     print(f"input shape : {tuple(x.shape)}  range=[{x.min():.3f}, {x.max():.3f}]")
 
     # Tiny generative schedule so the reverse chain / Euler integration is cheap on CPU.
     model = PatchReconstructionModel(
-        img_size=32, patch_size=args.patch_size, channels=3,
+        img_size=image_size, patch_size=args.patch_size, channels=3,
         dim=args.dim, depth=args.depth, num_heads=args.num_heads,
         head_kind=args.head, head_hidden=args.head_hidden, head_blocks=args.head_blocks,
         timesteps=20, flow_sample_steps=8,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model params: {n_params:,}  (backbone + {args.head} head)")
+
+    # The backbone must emit exactly num_patches tokens -> confirms patchify works at this image_size.
+    with torch.no_grad():
+        tokens = model.backbone(x)
+    assert tokens.shape[1] == num_patches, f"expected {num_patches} patch tokens, got {tokens.shape[1]}"
 
     # One forward + backward through the training loss.
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -131,7 +148,7 @@ def overfit(args: argparse.Namespace) -> None:
     print(f"device: {device}  head: {args.head}  dataset: {args.dataset}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = make_run_dir(args.dataset, args.head, "overfit", timestamp)
+    run_dir = make_run_dir(args.dataset, args.head, "overfit", timestamp, args.seed)
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
 
     loader = build_loader(args, train=True, batch_size=args.overfit_batch, shuffle=True)
@@ -233,7 +250,7 @@ def train(args: argparse.Namespace) -> None:
     print(f"device: {device}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = make_run_dir(args.dataset, args.head, "train", timestamp)
+    run_dir = make_run_dir(args.dataset, args.head, "train", timestamp, args.seed)
     writer = SummaryWriter(log_dir=str(run_dir / "tb"))
 
     train_loader = build_loader(args, train=True, batch_size=args.batch_size)
@@ -306,7 +323,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=0, help="RNG seed; fixes data/model/noise and is part of the run-dir name")
     # backbone / head architecture (shared across heads for a fair comparison)
     p.add_argument("--patch-size", type=int, default=8)
     p.add_argument("--dim", type=int, default=128, help="transformer token dimension D")

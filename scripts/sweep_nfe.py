@@ -116,6 +116,18 @@ def build_model(args: argparse.Namespace, image_size: int, device: torch.device,
 # --------------------------------------------------------------------------- #
 # NFE-controllable reconstruction
 # --------------------------------------------------------------------------- #
+def _ddim_timesteps(timesteps: int, nfe: int) -> list[int]:
+    """The `nfe` respaced timesteps, descending from T-1 to 0 (the DDIM sampling order).
+
+    These are indices INTO the original T-length schedule. Reducing steps means DDIM sub-samples
+    the *original* cumulative alpha_bar at these indices -- it does NOT re-derive a fresh beta
+    schedule for the smaller step count (that would change the noise levels the network was trained
+    on and is the classic respacing bug). nfe=1 -> just [T-1] (one-shot x0 prediction from noise).
+    Single source of truth so `_ddim_sample` and the respacing test agree on the exact timesteps.
+    """
+    return torch.linspace(timesteps - 1, 0, steps=nfe).round().long().tolist()
+
+
 @torch.no_grad()
 def _ddim_sample(head: DiffusionPatchHead, cond: torch.Tensor, nfe: int, device: torch.device
                  ) -> torch.Tensor:
@@ -134,8 +146,8 @@ def _ddim_sample(head: DiffusionPatchHead, cond: torch.Tensor, nfe: int, device:
     m = b * n
 
     x = torch.randn(m, head.patch_dim, device=device)  # pure noise at the top of the chain
-    # `nfe` timesteps, descending from T-1 down to 0 (nfe=1 -> just [T-1]).
-    seq = torch.linspace(timesteps - 1, 0, steps=nfe).round().long().tolist()
+    # `nfe` timesteps, descending from T-1 down to 0 (nfe=1 -> just [T-1]); sub-samples alpha_bars.
+    seq = _ddim_timesteps(timesteps, nfe)
     for j, t_cur in enumerate(seq):
         t_batch = torch.full((m,), t_cur, device=device, dtype=torch.long)
         eps = head.denoiser(x, t_batch, condf)
@@ -335,9 +347,74 @@ def smoke_test() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# respacing test: verify DDIM sub-samples the original alpha_bar (not a re-derived schedule)
+# --------------------------------------------------------------------------- #
+def respacing_test() -> None:
+    """Guard the DDIM timestep respacing at NFE=5 and NFE=50.
+
+    Two checks per NFE:
+      (1) the respaced timesteps and their alpha_bar are exactly the ORIGINAL cumulative alpha_bar
+          sub-sampled at those indices -- strictly decreasing in t and inside (0, 1]; and
+      (2) DDIM sampling with random weights stays finite, keeps the batch shape, and stays in [-1, 1].
+    """
+    print("=== DDIM respacing test ===")
+    set_seed(0)
+    device = torch.device("cpu")
+
+    # Full-length training schedule. DDIM must sub-sample THIS; it must not rebuild betas for few steps.
+    T = 1000
+    model = PatchReconstructionModel(
+        img_size=32, patch_size=16, channels=3, dim=32, depth=1, num_heads=2,
+        head_kind="diffusion", timesteps=T, head_hidden=32, head_blocks=1,
+    ).to(device).eval()
+    head = model.head
+    alpha_bars = head.diffusion.alpha_bars  # (T,) the one true cumulative product
+
+    assert head.diffusion.timesteps == T, "head is not carrying the full-length schedule"
+    assert alpha_bars.shape == (T,), f"alpha_bars has wrong length {tuple(alpha_bars.shape)}"
+
+    images = torch.rand(2, 3, 32, 32, device=device) * 2 - 1  # [-1, 1]
+
+    for nfe in (5, 50):
+        seq = _ddim_timesteps(T, nfe)                 # descending sampling order (indices into 0..T-1)
+        ab = alpha_bars[torch.tensor(seq)]            # alpha_bar SUB-SAMPLED from the original schedule
+        ab_list = [round(v, 6) for v in ab.tolist()]
+        print(f"\nNFE={nfe}: respaced timesteps (descending) = {seq}")
+        print(f"NFE={nfe}: alpha_bar at those timesteps      = {ab_list}")
+
+        assert len(seq) == nfe, f"NFE={nfe} produced {len(seq)} timesteps"
+        assert seq[0] == T - 1 and seq[-1] == 0, f"NFE={nfe} must span [T-1 .. 0], got {seq[0]}..{seq[-1]}"
+        # Strictly descending timesteps -> no repeats and a genuine sub-sample of the original grid.
+        assert all(a > b for a, b in zip(seq, seq[1:])), f"NFE={nfe} timesteps not strictly descending: {seq}"
+        # Each value is exactly the original cumulative alpha_bar at that index -- the whole point.
+        for t_i, a_i in zip(seq, ab.tolist()):
+            assert abs(a_i - alpha_bars[t_i].item()) < 1e-12, "alpha_bar is not a sub-sample of the schedule"
+        # alpha_bar lands in (0, 1].
+        assert bool((ab > 0).all()) and bool((ab <= 1.0).all()), f"NFE={nfe} alpha_bar escaped (0, 1]"
+        # In ASCENDING timestep order alpha_bar must strictly DECREASE (more noise -> smaller alpha_bar).
+        ab_by_t = alpha_bars[torch.tensor(sorted(seq))].tolist()
+        assert all(a > b for a, b in zip(ab_by_t, ab_by_t[1:])), \
+            f"NFE={nfe} alpha_bar not strictly decreasing in t"
+
+        # DDIM sampling with the random-init weights: no NaN/Inf, correct shape, bounded range.
+        set_seed(0)
+        with torch.no_grad():
+            recon = reconstruct_nfe(model, images, nfe)
+        assert torch.isfinite(recon).all(), f"NFE={nfe} DDIM sampling produced non-finite values"
+        assert recon.shape == images.shape, f"NFE={nfe} shape {tuple(recon.shape)} != {tuple(images.shape)}"
+        lo, hi = recon.min().item(), recon.max().item()
+        assert -1.0 <= lo and hi <= 1.0, f"NFE={nfe} range [{lo:.3f}, {hi:.3f}] escapes [-1, 1]"
+        print(f"NFE={nfe}: recon shape={tuple(recon.shape)}  finite=True  range=[{lo:.3f}, {hi:.3f}]")
+
+    print("\nrespacing test PASSED")
+
+
+# --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Sweep NFE (sampling steps) for a trained PatchReconstructionModel")
     p.add_argument("--smoke", action="store_true", help="CPU smoke: random tiny model + small NFEs, no checkpoint")
+    p.add_argument("--test-respacing", action="store_true",
+                   help="CPU test: verify DDIM sub-samples the original alpha_bar at NFE=5/50 (no checkpoint)")
     p.add_argument("--ckpt", type=str, default=None, help="path to a trained PatchReconstructionModel checkpoint (.pt)")
     p.add_argument("--head", choices=["flow", "diffusion"], default="flow", help="which head the checkpoint has")
     p.add_argument("--dataset", choices=["cifar10", "ffhq64"], default="cifar10")
@@ -363,6 +440,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.test_respacing:
+        respacing_test()
+        return
     if args.smoke:
         smoke_test()
         return
